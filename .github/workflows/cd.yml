@@ -1,0 +1,64 @@
+name: CD Pipeline & DAST
+
+on:
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types:
+      - completed
+
+jobs:
+  deploy-and-dast:
+    name: Deploy & DAST Scan
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Setup Kubernetes
+      - name: Create k8s Kind Cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.20.0
+
+      # Deploy Application
+      - name: Deploy to Cluster
+        run: |
+          kubectl apply -f backend/k8s/deployment.yaml
+          kubectl apply -f backend/k8s/service.yaml
+          # Wait for pods to be ready
+          kubectl wait --for=condition=ready pod -l app=eventhive-backend --timeout=300s
+
+      # Port Forward (Expose App to Runner)
+      - name: Port Forward
+        run: |
+          kubectl port-forward svc/eventhive-service 5000:80 &
+          sleep 10 # Give it time to start
+
+      # Dummy DAST (Dynamic Application Security Testing)
+      # simulate an attack script checking for sensitive headers or endpoints.
+      - name: Run Dummy DAST Scan
+        run: |
+          echo " Starting DAST Security Scan..."
+          
+          # Test 1: Check if API is reachable
+          HTTP_STATUS=$(curl -o /dev/null -s -w "%{http_code}\n" http://localhost:5000/api/events)
+          if [ "$HTTP_STATUS" == "200" ]; then
+            echo " API Endpoint Accessible"
+          else
+            echo " API Endpoint Failed"
+            exit 1
+          fi
+
+          # Test 2: Security Header Check (Simulated)
+          # We check if the server reveals too much info (like 'X-Powered-By')
+          HEADERS=$(curl -s -I http://localhost:5000/api/events)
+          if echo "$HEADERS" | grep -q "X-Powered-By"; then
+            echo "  Warning: Server is revealing tech stack (X-Powered-By header found)"
+            # In a real strict DAST, we might fail here. For now, we warn.
+          else
+            echo " Security Header Check Passed (No sensitive info leaked)"
+          fi
+
+          echo " DAST Scan Completed Successfully."
